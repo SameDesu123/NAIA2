@@ -154,6 +154,8 @@ jobs:
             --source . --target app/electron/dist/NAIA-Web --copy
           python tools/stage_python_runtime.py \
             app/electron/dist/NAIA-Web "${pythonLocation}" --copy
+          python ../automation/packaging/prune_python_runtime.py \
+            app/electron/dist/NAIA-Web/resources/python
           cp ../automation/packaging/naia_backend_launcher.sh \
             app/electron/dist/NAIA-Web/resources/naia-backend/NAIA_web_headless
           chmod +x app/electron/dist/NAIA-Web/resources/naia-backend/NAIA_web_headless
