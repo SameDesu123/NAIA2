@@ -170,8 +170,10 @@ jobs:
           const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
           if (packageJson.build?.mac?.icon && !fs.existsSync(packageJson.build.mac.icon)) {
             delete packageJson.build.mac.icon;
-            fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
           }
+          packageJson.build.mac.identity = "-";
+          packageJson.build.mac.hardenedRuntime = false;
+          fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
           NODE
 
       - name: Build standalone Electron app bundle
@@ -226,7 +228,6 @@ jobs:
           print("Bundled Python imports succeeded")
           PY
 
-          codesign --force --deep --sign - "${APP_PATH}"
           codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
 
       - name: Smoke test packaged app and backend
