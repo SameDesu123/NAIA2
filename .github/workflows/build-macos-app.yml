@@ -1,0 +1,250 @@
+name: Build upstream macOS releases
+
+on:
+  schedule:
+    - cron: "23 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Upstream release tag to rebuild (blank selects the latest release)
+        required: false
+        type: string
+
+concurrency:
+  group: upstream-macos-release-build
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Find new upstream releases
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_tags: ${{ steps.releases.outputs.release_tags }}
+      should_build: ${{ steps.releases.outputs.should_build }}
+    steps:
+      - name: Select release tags
+        id: releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+          UPSTREAM_REPOSITORY: DNT-LAB/NAIA2.0
+        run: |
+          gh api "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100" \
+            > upstream-releases.json
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            > origin-releases.json
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          upstream = json.loads(Path("upstream-releases.json").read_text(encoding="utf-8"))
+          origin = json.loads(Path("origin-releases.json").read_text(encoding="utf-8"))
+          if not upstream:
+              raise SystemExit("The upstream repository has no GitHub releases")
+
+          requested = os.environ.get("REQUESTED_TAG", "").strip()
+          upstream_tags = [release["tag_name"] for release in upstream]
+          if requested:
+              if requested not in upstream_tags:
+                  raise SystemExit(f"Unknown upstream release tag: {requested}")
+              selected = [requested]
+          elif os.environ["EVENT_NAME"] == "workflow_dispatch":
+              selected = [upstream_tags[0]]
+          else:
+              origin_tags = {release["tag_name"] for release in origin}
+              mirrored_index = next(
+                  (index for index, tag in enumerate(upstream_tags) if tag in origin_tags),
+                  None,
+              )
+              if mirrored_index is None:
+                  # Establish a baseline without rebuilding the entire release history.
+                  selected = [upstream_tags[0]]
+              else:
+                  # GitHub returns newest first; publish multiple new releases oldest first.
+                  selected = list(reversed(upstream_tags[:mirrored_index]))
+
+          should_build = bool(selected)
+          matrix_tags = selected if selected else ["__no_release__"]
+          output_path = Path(os.environ["GITHUB_OUTPUT"])
+          with output_path.open("a", encoding="utf-8") as output:
+              output.write(f"release_tags={json.dumps(matrix_tags, separators=(',', ':'))}\n")
+              output.write(f"should_build={str(should_build).lower()}\n")
+
+          print("Selected upstream releases:", ", ".join(selected) if selected else "none")
+          PY
+
+  build:
+    name: Build ${{ matrix.release_tag }} for ${{ matrix.display_name }}
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        release_tag: ${{ fromJSON(needs.resolve.outputs.release_tags) }}
+        target: [arm64, x86_64]
+        include:
+          - target: arm64
+            display_name: Apple Silicon
+            runner: macos-15
+            artifact_suffix: arm64
+          - target: x86_64
+            display_name: Intel
+            runner: macos-15-intel
+            artifact_suffix: x86_64
+
+    steps:
+      - name: Check out packaging automation
+        uses: actions/checkout@v5
+        with:
+          path: automation
+
+      - name: Check out exact upstream release tag
+        uses: actions/checkout@v5
+        with:
+          repository: DNT-LAB/NAIA2.0
+          ref: ${{ matrix.release_tag }}
+          fetch-depth: 1
+          path: source
+
+      - name: Add standalone packaging tools
+        run: cp -R automation/packaging source/packaging
+
+      - name: Read upstream build metadata
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ matrix.release_tag }}
+        run: |
+          echo "commit=$(git -C source rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          safe_tag="${RELEASE_TAG//\//-}"
+          echo "safe_tag=${safe_tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: source/requirements_mac.txt
+
+      - name: Install packaging dependencies
+        working-directory: source
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install --requirement requirements_mac.txt "pyinstaller==6.22.2"
+
+      - name: Build standalone app bundle
+        working-directory: source
+        env:
+          NAIA_BUILD_NUMBER: ${{ github.run_number }}
+          NAIA_BUILD_VERSION: ${{ steps.metadata.outputs.commit }}
+          NAIA_RELEASE_TAG: ${{ matrix.release_tag }}
+          NAIA_TARGET_ARCH: ${{ matrix.target }}
+        run: python -m PyInstaller --noconfirm --clean packaging/NAIA2.spec
+
+      - name: Verify bundle structure, architecture, and signature
+        working-directory: source
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.target }}
+        run: |
+          test -d dist/NAIA2.app/Contents/MacOS
+          test -f dist/NAIA2.app/Contents/Resources/runtime/.bundle-version
+          plutil -lint dist/NAIA2.app/Contents/Info.plist
+          actual_architectures="$(lipo -archs dist/NAIA2.app/Contents/MacOS/NAIA2)"
+          echo "Executable architectures: ${actual_architectures}"
+          case " ${actual_architectures} " in
+            *" ${EXPECTED_ARCHITECTURE} "*) ;;
+            *) echo "Expected architecture ${EXPECTED_ARCHITECTURE} was not found" >&2; exit 1 ;;
+          esac
+          codesign --verify --deep --strict --verbose=2 dist/NAIA2.app
+
+      - name: Archive app bundle
+        working-directory: source
+        env:
+          ARTIFACT_SUFFIX: ${{ matrix.artifact_suffix }}
+          SAFE_TAG: ${{ steps.metadata.outputs.safe_tag }}
+        run: |
+          archive="NAIA2-${SAFE_TAG}-macOS-${ARTIFACT_SUFFIX}.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/NAIA2.app "${archive}"
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+
+      - name: Upload standalone app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NAIA2-${{ steps.metadata.outputs.safe_tag }}-macOS-${{ matrix.artifact_suffix }}
+          path: |
+            source/NAIA2-${{ steps.metadata.outputs.safe_tag }}-macOS-${{ matrix.artifact_suffix }}.zip
+            source/NAIA2-${{ steps.metadata.outputs.safe_tag }}-macOS-${{ matrix.artifact_suffix }}.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    name: Publish standalone macOS releases
+    needs: [resolve, build]
+    if: needs.resolve.outputs.should_build == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out origin history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download built app artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Mirror tags and publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAGS: ${{ needs.resolve.outputs.release_tags }}
+          UPSTREAM_REPOSITORY: DNT-LAB/NAIA2.0
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+
+          while IFS= read -r release_tag; do
+            git fetch --force --no-tags upstream \
+              "refs/tags/${release_tag}:refs/tags/${release_tag}"
+            git push origin "refs/tags/${release_tag}:refs/tags/${release_tag}"
+
+            mapfile -t assets < <(
+              find artifacts -type f \
+                \( -name "NAIA2-${release_tag}-macOS-*.zip" \
+                   -o -name "NAIA2-${release_tag}-macOS-*.zip.sha256" \) \
+                -print | sort
+            )
+            if (( ${#assets[@]} != 4 )); then
+              echo "Expected four release files for ${release_tag}, found ${#assets[@]}" >&2
+              exit 1
+            fi
+
+            if ! gh release view "${release_tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              prerelease="$(gh api \
+                "repos/${UPSTREAM_REPOSITORY}/releases/tags/${release_tag}" \
+                --jq '.prerelease')"
+              release_args=(
+                "${release_tag}"
+                --repo "${GITHUB_REPOSITORY}"
+                --verify-tag
+                --title "NAIA2 ${release_tag} standalone macOS"
+                --notes "Standalone macOS builds of upstream release ${release_tag}. Source: https://github.com/${UPSTREAM_REPOSITORY}/releases/tag/${release_tag}"
+              )
+              if [[ "${prerelease}" == "true" ]]; then
+                release_args+=(--prerelease)
+              fi
+              gh release create "${release_args[@]}"
+            fi
+
+            gh release upload "${release_tag}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+          done < <(jq -r '.[]' <<< "${RELEASE_TAGS}")

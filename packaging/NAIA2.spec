@@ -72,6 +72,7 @@ hiddenimports = sorted(
 
 target_arch = os.environ.get("NAIA_TARGET_ARCH") or None
 build_number = os.environ.get("NAIA_BUILD_NUMBER", "1")
+release_version = os.environ.get("NAIA_RELEASE_TAG", "2.0").removeprefix("v")
 
 a = Analysis(
     [str(PROJECT_ROOT / "packaging" / "macos_launcher.py")],
@@ -122,7 +123,7 @@ app = BUNDLE(
     version=build_number,
     info_plist={
         "CFBundleDisplayName": "NAIA2",
-        "CFBundleShortVersionString": "2.0",
+        "CFBundleShortVersionString": release_version,
         "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication",
