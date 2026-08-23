@@ -173,6 +173,10 @@ jobs:
           }
           packageJson.build.mac.identity = "-";
           packageJson.build.mac.hardenedRuntime = false;
+          packageJson.build.mac.signIgnore = [
+            "/Contents/Resources/python/",
+            "/Contents/Resources/naia-backend/",
+          ];
           fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
           NODE
 
