@@ -27,6 +27,7 @@ build/
 # PyInstaller
 *.manifest
 *.spec
+!packaging/NAIA2.spec
 
 # 조건부 편집기 v2 회귀 테스트 — 개발자 전용, distribution 에서 제외
 tests/conditional/
