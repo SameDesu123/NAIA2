@@ -171,12 +171,8 @@ jobs:
           if (packageJson.build?.mac?.icon && !fs.existsSync(packageJson.build.mac.icon)) {
             delete packageJson.build.mac.icon;
           }
-          packageJson.build.mac.identity = "-";
+          packageJson.build.mac.identity = null;
           packageJson.build.mac.hardenedRuntime = false;
-          packageJson.build.mac.signIgnore = [
-            "/Contents/Resources/python/",
-            "/Contents/Resources/naia-backend/",
-          ];
           fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
           NODE
 
@@ -197,7 +193,7 @@ jobs:
           fi
           echo "app_path=${app_path}" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify bundle structure, architecture, and signature
+      - name: Verify bundle structure and architecture
         working-directory: source
         env:
           EXPECTED_ARCHITECTURE: ${{ matrix.target }}
@@ -231,8 +227,6 @@ jobs:
           import uvicorn
           print("Bundled Python imports succeeded")
           PY
-
-          codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
 
       - name: Smoke test packaged app and backend
         working-directory: source
